@@ -1,6 +1,6 @@
 /*********************************************************************
 * 	WarpSharp for AviUtl
-* 								ver. 0.01
+* 								ver. 0.01a
 * 
 * AviSynth版のWarpSharpがGPLらしいので、これもGPLになります。
 * 
@@ -18,6 +18,11 @@
 * along with this program; if not, write to the Free Software
 * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA, or visit
 * http://www.gnu.org/copyleft/gpl.html .
+* 
+* 
+* [2003]
+* 	10/19:	公開(0.01)
+* 			最下端にゴミが出るバグ修正(0.01a)
 * 
 *********************************************************************/
 #include <windows.h>
@@ -103,7 +108,7 @@ inline int AviUtlY(int y){ return ((y-15)*16 * 256 +110) / 220; }
 //	FILTER_DLL構造体
 //----------------------------
 char filtername[] = "WarpSharp";
-char filterinfo[] = "WarpSharp for AviUtl ver 0.01 Transplant by MakKi";
+char filterinfo[] = "WarpSharp for AviUtl ver 0.01a Transplant by MakKi";
 #define track_N 4
 #if track_N
 TCHAR *track_name[]   = { "depth", "blur", "bump", "cubic" };	// トラックバーの名前
@@ -228,8 +233,8 @@ BOOL func_proc(FILTER *fp,FILTER_PROC_INFO *fpip)
 			else if(dispy > hi_dispy) dispy = hi_dispy;
 
 			const PIXEL_YC* src2 = src + ((dispx>>8)-1) + ((dispy>>8)-1)*fpip->max_w;
-			int *qh = (int*)cubic + (dispx & 255) * 4;
-			int *qv = (int*)cubic + (dispy & 255) * 4;
+			const int *qh = (int*)cubic + (dispx & 255) * 4;
+			const int *qv = (int*)cubic + (dispy & 255) * 4;
 
 			dst->y = InterpolateCubic(src2,fpip->max_w,qh,qv);
 			dst->cb = src->cb;
@@ -246,8 +251,8 @@ BOOL func_proc(FILTER *fp,FILTER_PROC_INFO *fpip)
 		src += fpip->max_w - fpip->w +1;
 		++bum;
 
-		lo_dispy -= 255;
-		hi_dispy -= 255;
+		lo_dispy -= 256;
+		hi_dispy -= 256;
 	}
 	memcpy(dst,src,fpip->w*sizeof(*dst));
 
@@ -255,6 +260,14 @@ BOOL func_proc(FILTER *fp,FILTER_PROC_INFO *fpip)
 	fpip->ycp_edit = fpip->ycp_temp;
 	fpip->ycp_temp = dst;
 
+/* test *
+	for(i=0;i<fpip->h;i++){
+		for(int j=0;j<fpip->w;j++){
+			fpip->ycp_edit[i*fpip->max_w+j].y = bump[i*fpip->w+j];
+		}
+	}
+
+//*/
 	delete[] bump;
 	delete[] buf;
 
@@ -322,6 +335,7 @@ void Blur(short *dst,short** row,short*(*tbl)[kernel],const FILTER_PROC_INFO* fp
 	memcpy(row[i],row[i?i-1:kernel-1],fpip->w*sizeof(**row));
 	BlurCol(dst,tbl[i],fpip->w);
 	if(++i>=kernel) i = 0;
+	dst += fpip->w;
 	memcpy(row[i],row[i?i-1:kernel-1],fpip->w*sizeof(**row));
 	BlurCol(dst,tbl[i],fpip->w);
 }
@@ -362,11 +376,11 @@ inline int InterpolateCubic(const PIXEL_YC* src,int pitch,const int *qh,const in
 	const PIXEL_YC* p3 = p2 + pitch;
 	int luma;
 
-	luma  = ((p0[0].y*qh[0] + p0[1].y*qh[1] + p0[2].y*qh[2] + p0[3].y*qh[3] + 512) >>10) * qv[0];
-	luma += ((p1[0].y*qh[0] + p1[1].y*qh[1] + p1[2].y*qh[2] + p1[3].y*qh[3] + 512) >>10) * qv[1];
-	luma += ((p2[0].y*qh[0] + p2[1].y*qh[1] + p2[2].y*qh[2] + p2[3].y*qh[3] + 512) >>10) * qv[2];
-	luma += ((p3[0].y*qh[0] + p3[1].y*qh[1] + p3[2].y*qh[2] + p3[3].y*qh[3] + 512) >>10) * qv[3];
-	luma = (luma + (1<<17)) >> 18;
+	luma  = ((p0[0].y*qh[0] + p0[1].y*qh[1] + p0[2].y*qh[2] + p0[3].y*qh[3] + 1024) >>11) * qv[0];
+	luma += ((p1[0].y*qh[0] + p1[1].y*qh[1] + p1[2].y*qh[2] + p1[3].y*qh[3] + 1024) >>11) * qv[1];
+	luma += ((p2[0].y*qh[0] + p2[1].y*qh[1] + p2[2].y*qh[2] + p2[3].y*qh[3] + 1024) >>11) * qv[2];
+	luma += ((p3[0].y*qh[0] + p3[1].y*qh[1] + p3[2].y*qh[2] + p3[3].y*qh[3] + 1024) >>11) * qv[3];
+	luma = (luma + (1<<16)) >> 17;
 
 	if(luma<AviUtlY(0)) luma = AviUtlY(0);
 	else if(luma>AviUtlY(255)) luma = AviUtlY(255);
@@ -382,7 +396,7 @@ BOOL func_WndProc( HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam, void *
 	switch(message){
 		case WM_KEYUP:	// メインウィンドウへ送る
 		case WM_KEYDOWN:
-//		case WM_MOUSEWHEEL:
+		case WM_MOUSEWHEEL:
 			SendMessage(GetWindow(hwnd, GW_OWNER), message, wparam, lparam);
 			break;
 	}

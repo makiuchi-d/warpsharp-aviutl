@@ -10,7 +10,7 @@
 //  VERSION INFO
 //
 VS_VIRSION_INFO VERSIONINFO
- FILEVERSION    0,0,1,0
+ FILEVERSION    0,0,1,1
  PRODUCTVERSION 0,0,1
  FILEFLAGSMASK  0x3FL
  FILEFLAGS      0x0L
@@ -24,12 +24,12 @@ VS_VIRSION_INFO VERSIONINFO
 		{
 			VALUE "Comments",         "オリジナルのAviSynth版WarpSharpの作者様に多謝\0"
             VALUE "FileDescription",  "WarpSharp Filter for AviUtl 0.98以降\0"
-            VALUE "FileVersion",      "0.0.1.0\0"
+            VALUE "FileVersion",      "0.0.1.1\0"
             VALUE "InternalName",     "warpsharp\0"
             VALUE "LegalCopyright",   "Transplant:MakKi\0"
             VALUE "OriginalFilename", "warpsharp.aup\0"
             VALUE "ProductName",      "WarpSharp for AviUtl\0"
-            VALUE "ProductVersion",   "0.01\0"
+            VALUE "ProductVersion",   "0.01a\0"
 		}
 	}
     BLOCK "VarFileInfo"
