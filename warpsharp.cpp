@@ -1,6 +1,6 @@
 /*********************************************************************
 * 	WarpSharp for AviUtl
-* 								ver. 0.01a
+* 								ver. 0.02
 * 
 * AviSynth版のWarpSharpがGPLらしいので、これもGPLになります。
 * 
@@ -23,6 +23,9 @@
 * [2003]
 * 	10/19:	公開(0.01)
 * 			最下端にゴミが出るバグ修正(0.01a)
+* [2004]
+* 	01/10:	Cubic4Tableでの無駄な再計算を回避
+* 	01/12:	適応範囲の設定を追加(0.02)
 * 
 *********************************************************************/
 #include <windows.h>
@@ -34,10 +37,20 @@
 //--------------------------------------------------------------------
 class Cubic4Table {
 	int table[1024];
+	int a;
 
 public:
-	Cubic4Table(int a) {
-		double A = (double)a / 10;
+	Cubic4Table(int _a =-6)
+	{
+		a = _a+1;
+		SetTable(_a);
+	}
+
+	void SetTable(int _a)
+	{
+		if(a==_a) return;
+
+		double A = (double)_a / 10;
 		for(int i=0; i<256; i++) {
 			double d = (double)i / 256.0;
 			int y1, y2, y3, y4, ydiff;
@@ -83,6 +96,38 @@ public:
 	{ return table; }
 };
 
+//--------------------------------------------------------------------
+//	class DefaultPicture
+//--------------------------------------------------------------------
+class DefaultPicture {
+	PIXEL_YC* ycp_edit;
+	PIXEL_YC* ycp_temp;
+	int       h,w;
+public:
+	DefaultPicture(){  }
+	DefaultPicture(const FILTER_PROC_INFO* fpip)
+	{
+		ycp_edit = fpip->ycp_edit;
+		ycp_temp = fpip->ycp_temp;
+		h = fpip->h;
+		w = fpip->w;
+	}
+
+	void Store(FILTER_PROC_INFO* fpip)
+	{
+		fpip->ycp_edit = ycp_edit;
+		fpip->ycp_temp = ycp_temp;
+		fpip->h = h;
+		fpip->w = w;
+	}
+	void ExchangeStore(FILTER_PROC_INFO* fpip)
+	{
+		fpip->ycp_edit = ycp_temp;
+		fpip->ycp_temp = ycp_edit;
+		fpip->h = h;
+		fpip->w = w;
+	}
+};
 
 
 //----------------------------
@@ -95,12 +140,14 @@ const int kernel = radius * 2 + 1;
 //----------------------------
 //	プロトタイプ
 //----------------------------
-void  Bump(short *dst,const PIXEL_YC *src,const FILTER_PROC_INFO* fpip,int bump);
-void  Blur(short *dst,short** row,short*(*tbl)[kernel],const FILTER_PROC_INFO* fpip);
-void  BlurRow(short* d,short* s,int w);
-void  BlurCol(short* d,short** tbl,int w);
 inline int InterpolateCubic(const PIXEL_YC* src,int pitch,const int *qh,const int *qv);
 inline int AviUtlY(int y){ return ((y-15)*16 * 256 +110) / 220; }
+static void  Bump(short *dst,const PIXEL_YC *src,const FILTER_PROC_INFO* fpip,int bump);
+static void  Blur(short *dst,short** row,short*(*tbl)[kernel],const FILTER_PROC_INFO* fpip);
+static void  BlurRow(short* d,short* s,int w);
+static void  BlurCol(short* d,short** tbl,int w);
+static BOOL NegaPosi(FILTER *fp,FILTER_PROC_INFO *fpip);
+static void  CopyEdge(FILTER *fp,FILTER_PROC_INFO *fpip);
 
 
 
@@ -108,25 +155,30 @@ inline int AviUtlY(int y){ return ((y-15)*16 * 256 +110) / 220; }
 //	FILTER_DLL構造体
 //----------------------------
 char filtername[] = "WarpSharp";
-char filterinfo[] = "WarpSharp for AviUtl ver 0.01a Transplant by MakKi";
-#define track_N 4
+char filterinfo[] = "WarpSharp for AviUtl ver 0.02 Transplant by MakKi";
+#define track_N 8
 #if track_N
-TCHAR *track_name[]   = { "depth", "blur", "bump", "cubic" };	// トラックバーの名前
-int   track_default[] = {    128 ,     3 ,   128 ,     -6  };	// トラックバーの初期値
-int   track_s[]       = {      0 ,     1 ,     0 ,    -50  };	// トラックバーの下限値
-int   track_e[]       = {    256 ,     9 ,   256 ,     50  };	// トラックバーの上限値
+TCHAR *track_name[]   = { "depth", "blur", "bump", "cubic", "上", "下", "左", "右"};	// トラックバーの名前
+int   track_default[] = {    128 ,     3 ,   128 ,     -6 ,   0 ,   0 ,   0 ,   0 };	// トラックバーの初期値
+int   track_s[]       = {      0 ,     1 ,     0 ,    -50 ,   0 ,   0 ,   0 ,   0 };	// トラックバーの下限値
+int   track_e[]       = {    256 ,     9 ,   256 ,     50 , 256 , 256 , 256 , 256 };	// トラックバーの上限値
 #endif
 
-#define check_N 0
+#define check_N 1
 #if check_N
-TCHAR *check_name[]   = { 0 };	// チェックボックス
-int   check_default[] = { 0, 0 };	// デフォルト
+TCHAR *check_name[]   = { "範囲表示" };	// チェックボックス
+int   check_default[] = {  0 };	// デフォルト
 #endif
 
 #define tDEPTH  0
 #define tBLUR   1
 #define tBUMP   2
 #define tCUBIC  3
+#define tTOP    4
+#define tBTM    5
+#define tLEFT   6
+#define tRIGHT  7
+#define cDISP   0
 
 
 FILTER_DLL filter = {
@@ -174,6 +226,24 @@ EXTERN_C FILTER_DLL __declspec(dllexport) * __stdcall GetFilterTable( void )
 *===================================================================*/
 BOOL func_proc(FILTER *fp,FILTER_PROC_INFO *fpip)
 {
+	DefaultPicture defpic(fpip);
+
+	if(fp->track[tTOP] || fp->track[tBTM] || fp->track[tLEFT] || fp->track[tRIGHT]){
+		// 範囲指定されている
+		CopyEdge(fp,fpip);	// 範囲外をコピー
+		fpip->ycp_edit += fp->track[tLEFT] + fp->track[tTOP] * fpip->max_w;
+		fpip->ycp_temp += fp->track[tLEFT] + fp->track[tTOP] * fpip->max_w;
+		fpip->w        -= fp->track[tLEFT] + fp->track[tRIGHT];
+		fpip->h        -= fp->track[tTOP]  + fp->track[tBTM];
+	}
+
+	if(fp->check[cDISP]){	// 適用範囲表示
+		NegaPosi(fp,fpip);	// NegativePositive
+		defpic.Store(fpip);
+		return TRUE;
+	}
+
+
 	int i;
 	short *bump = new short[fpip->w*fpip->h];
 	short *bum  = bump;
@@ -197,7 +267,8 @@ BOOL func_proc(FILTER *fp,FILTER_PROC_INFO *fpip)
 		Blur(bum,row,tbl,fpip);
 
 	// Cubic
-	Cubic4Table cubic(fp->track[tCUBIC]);
+	static Cubic4Table cubic;
+	cubic.SetTable(fp->track[tCUBIC]);
 
 	// WarpSharp
 	int depth = fp->track[tDEPTH];
@@ -256,9 +327,7 @@ BOOL func_proc(FILTER *fp,FILTER_PROC_INFO *fpip)
 	}
 	memcpy(dst,src,fpip->w*sizeof(*dst));
 
-	dst = fpip->ycp_edit;
-	fpip->ycp_edit = fpip->ycp_temp;
-	fpip->ycp_temp = dst;
+	defpic.ExchangeStore(fpip);
 
 /* test *
 	for(i=0;i<fpip->h;i++){
@@ -277,7 +346,7 @@ BOOL func_proc(FILTER *fp,FILTER_PROC_INFO *fpip)
 /*--------------------------------------------------------------------
 *	Bump	輪郭抽出
 *-------------------------------------------------------------------*/
-void Bump(short *dst,const PIXEL_YC *src,const FILTER_PROC_INFO* fpip,int bump)
+static void Bump(short *dst,const PIXEL_YC *src,const FILTER_PROC_INFO* fpip,int bump)
 {
 	memset(dst,0,fpip->w*sizeof(*dst));
 	dst += fpip->w;
@@ -314,7 +383,7 @@ void Bump(short *dst,const PIXEL_YC *src,const FILTER_PROC_INFO* fpip,int bump)
 /*--------------------------------------------------------------------
 *	Blur	輪郭ぼかし
 *-------------------------------------------------------------------*/
-void Blur(short *dst,short** row,short*(*tbl)[kernel],const FILTER_PROC_INFO* fpip)
+static void Blur(short *dst,short** row,short*(*tbl)[kernel],const FILTER_PROC_INFO* fpip)
 {
 	BlurRow(row[0], dst, fpip->w);
 	memcpy(row[1],row[0],fpip->w*sizeof(**row));
@@ -342,7 +411,7 @@ void Blur(short *dst,short** row,short*(*tbl)[kernel],const FILTER_PROC_INFO* fp
 /*--------------------------------------------------------------------
 *	BlurRow	横ぼかし
 *-------------------------------------------------------------------*/
-void BlurRow(short* d,short *s,int w)
+static void BlurRow(short* d,short *s,int w)
 {
 	d[0] = (s[0]*11 + s[1]*4 + s[2]          +8) >>4;
 	d[1] = (s[0]*5  + s[1]*6 + s[2]*4 + s[3] +8) >>4;
@@ -357,7 +426,7 @@ void BlurRow(short* d,short *s,int w)
 /*--------------------------------------------------------------------
 *	BlurCol	縦ぼかし
 *-------------------------------------------------------------------*/
-void BlurCol(short* d,short** tbl,int w)
+static void BlurCol(short* d,short** tbl,int w)
 {
 	int x = 0;
 
@@ -386,6 +455,65 @@ inline int InterpolateCubic(const PIXEL_YC* src,int pitch,const int *qh,const in
 	else if(luma>AviUtlY(255)) luma = AviUtlY(255);
 
 	return luma;
+}
+
+/*--------------------------------------------------------------------
+*	NegaPosi	ネガポジ
+*-------------------------------------------------------------------*/
+static BOOL NegaPosi(FILTER *fp,FILTER_PROC_INFO *fpip)
+{
+	PIXEL_YC* ptr1 = fpip->ycp_edit;
+
+	for(int i=fpip->h; i; --i){
+		PIXEL_YC* ptr2 = ptr1;
+		for(int j=fpip->w; j; --j){
+			ptr2->y  = 4096 - ptr2->y;
+			ptr2->cb = -ptr2->cb;
+			ptr2->cr = -ptr2->cr;
+			++ptr2;
+		}
+		ptr1 += fpip->max_w;
+	}
+
+	return TRUE;
+}
+
+/*--------------------------------------------------------------------
+*	CopyEdge	範囲の外をコピー
+*-------------------------------------------------------------------*/
+static void CopyEdge(FILTER *fp,FILTER_PROC_INFO *fpip)
+{
+	PIXEL_YC* src = fpip->ycp_edit;
+	PIXEL_YC* dst = fpip->ycp_temp;
+	int i;
+
+	int rowsize = fpip->w*sizeof(PIXEL_YC);
+
+	for(i=fp->track[tTOP];i;--i){
+		memcpy(dst,src,rowsize);
+		src += fpip->max_w;
+		dst += fpip->max_w;
+	}
+	int rightpitch = fpip->w - fp->track[tRIGHT];
+	int right = fp->track[tRIGHT]*sizeof(PIXEL_YC);
+	int left  = fp->track[tLEFT]*sizeof(PIXEL_YC);
+	for(i=fpip->h-fp->track[tTOP]-fp->track[tBTM];i;--i){
+		PIXEL_YC* src2 = src;
+		PIXEL_YC* dst2 = dst;
+		memcpy(dst2,src2,left);
+		src2 += rightpitch;
+		dst2 += rightpitch;
+		memcpy(dst2,src2,right);
+		src += fpip->max_w;
+		dst += fpip->max_w;
+	}
+	for(i=fp->track[tBTM];i;--i){
+		memcpy(dst,src,rowsize);
+		src += fpip->max_w;
+		dst += fpip->max_w;
+	}
+
+	return;
 }
 
 /*====================================================================
