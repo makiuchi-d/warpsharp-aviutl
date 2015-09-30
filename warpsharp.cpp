@@ -1,6 +1,6 @@
 /*********************************************************************
 * 	WarpSharp for AviUtl
-* 								ver. 0.02
+* 								ver. 0.03
 * 
 * AviSynth版のWarpSharpがGPLらしいので、これもGPLになります。
 * 
@@ -26,6 +26,15 @@
 * [2004]
 * 	01/10:	Cubic4Tableでの無駄な再計算を回避
 * 	01/12:	適応範囲の設定を追加(0.02)
+* 	01/26:	適応範囲パラメータの最大値を拡張
+* 	12/13:	01/10の修正が不完全だったのを修正
+* [2008]
+* 	06/28:	ぼかし省メモリ仕様のはずが、メモリ確保量そのままだったミス修正
+* 			Cubic4Table再計算は既に回避されてた(041213)けど、さらにfunc_updateに移動。
+* 			こっちはbumpもdepthも256でオーバーフローしないよ。
+* 			ぼかし処理最下端も一通り見直したけど大丈夫なはず。
+* 			適応範囲パラメータを大きくしすぎる時の問題も040126に修正してたみたい。
+* 			更新し忘れてました。ごめんなさい。(0.03)
 * 
 *********************************************************************/
 #include <windows.h>
@@ -50,6 +59,8 @@ public:
 	{
 		if(a==_a) return;
 
+		a = _a;
+	
 		double A = (double)_a / 10;
 		for(int i=0; i<256; i++) {
 			double d = (double)i / 256.0;
@@ -133,8 +144,12 @@ public:
 //----------------------------
 //	グローバル変数
 //----------------------------
-const int radius = 2;
-const int kernel = radius * 2 + 1;
+
+// 定数
+const int radius = 2;	// ぼかし半径
+const int kernel = radius * 2 + 1;	// ぼかし範囲
+
+static Cubic4Table cubic;
 
 
 //----------------------------
@@ -155,13 +170,13 @@ static void  CopyEdge(FILTER *fp,FILTER_PROC_INFO *fpip);
 //	FILTER_DLL構造体
 //----------------------------
 char filtername[] = "WarpSharp";
-char filterinfo[] = "WarpSharp for AviUtl ver 0.02 Transplant by MakKi";
+char filterinfo[] = "WarpSharp for AviUtl ver 0.03 Transplanted by MakKi";
 #define track_N 8
 #if track_N
 TCHAR *track_name[]   = { "depth", "blur", "bump", "cubic", "上", "下", "左", "右"};	// トラックバーの名前
 int   track_default[] = {    128 ,     3 ,   128 ,     -6 ,   0 ,   0 ,   0 ,   0 };	// トラックバーの初期値
 int   track_s[]       = {      0 ,     1 ,     0 ,    -50 ,   0 ,   0 ,   0 ,   0 };	// トラックバーの下限値
-int   track_e[]       = {    256 ,     9 ,   256 ,     50 , 256 , 256 , 256 , 256 };	// トラックバーの上限値
+int   track_e[]       = {    256 ,     9 ,   256 ,     50 , 512 , 512 , 512 , 512 };	// トラックバーの上限値
 #endif
 
 #define check_N 1
@@ -202,7 +217,7 @@ FILTER_DLL filter = {
 #endif
 	func_proc,   	// フィルタ処理関数
 	NULL,NULL,   	// 開始時,終了時に呼ばれる関数
-	NULL,        	// 設定が変更されたときに呼ばれる関数
+	func_update, 	// 設定が変更されたときに呼ばれる関数
 	func_WndProc,	// 設定ウィンドウプロシージャ
 	NULL,NULL,   	// システムで使用
 	NULL,NULL,   	// 拡張データ領域
@@ -221,6 +236,17 @@ EXTERN_C FILTER_DLL __declspec(dllexport) * __stdcall GetFilterTable( void )
 	return &filter;
 }
 
+//---------------------------------------------------------------------
+//		フィルタ設定変更時関数
+//---------------------------------------------------------------------
+BOOL func_update( FILTER *fp, int status )
+{
+	// Cubic
+	cubic.SetTable(fp->track[tCUBIC]);
+	
+	return TRUE;
+}
+
 /*====================================================================
 *	フィルタ処理関数
 *===================================================================*/
@@ -230,6 +256,8 @@ BOOL func_proc(FILTER *fp,FILTER_PROC_INFO *fpip)
 
 	if(fp->track[tTOP] || fp->track[tBTM] || fp->track[tLEFT] || fp->track[tRIGHT]){
 		// 範囲指定されている
+		if(fp->track[tTOP]+fp->track[tBTM]>=fpip->h-3 || fp->track[tLEFT]+fp->track[tRIGHT]>=fpip->w-3)
+			return FALSE;
 		CopyEdge(fp,fpip);	// 範囲外をコピー
 		fpip->ycp_edit += fp->track[tLEFT] + fp->track[tTOP] * fpip->max_w;
 		fpip->ycp_temp += fp->track[tLEFT] + fp->track[tTOP] * fpip->max_w;
@@ -253,7 +281,7 @@ BOOL func_proc(FILTER *fp,FILTER_PROC_INFO *fpip)
 
 	// ぼかし用作業領域
 	int   rowsize = (fpip->w+15)&~15;
-	short *buf = new short[rowsize*fpip->h * kernel +16];
+	short *buf = new short[rowsize * kernel +16];	// 省メモリにし忘れてた
 	short *row[kernel];
 	short *tbl[kernel][kernel];
 	row[0] = (short*)(((long)buf+15)&~15);
@@ -266,9 +294,7 @@ BOOL func_proc(FILTER *fp,FILTER_PROC_INFO *fpip)
 	for(i=fp->track[tBLUR];i;--i)	// 指定回ぼかす
 		Blur(bum,row,tbl,fpip);
 
-	// Cubic
-	static Cubic4Table cubic;
-	cubic.SetTable(fp->track[tCUBIC]);
+	delete[] buf;
 
 	// WarpSharp
 	int depth = fp->track[tDEPTH];
@@ -338,7 +364,6 @@ BOOL func_proc(FILTER *fp,FILTER_PROC_INFO *fpip)
 
 //*/
 	delete[] bump;
-	delete[] buf;
 
 	return TRUE;
 }
@@ -382,18 +407,22 @@ static void Bump(short *dst,const PIXEL_YC *src,const FILTER_PROC_INFO* fpip,int
 
 /*--------------------------------------------------------------------
 *	Blur	輪郭ぼかし
+*
+* 2行下まで横にぼかしたら縦にぼかせる。
+* ぼかし用バッファは5行分。使いまわす。
 *-------------------------------------------------------------------*/
 static void Blur(short *dst,short** row,short*(*tbl)[kernel],const FILTER_PROC_INFO* fpip)
 {
+	// radius = 2, kernel = 5
 	BlurRow(row[0], dst, fpip->w);
 	memcpy(row[1],row[0],fpip->w*sizeof(**row));
 	memcpy(row[2],row[0],fpip->w*sizeof(**row));
 	BlurRow(row[3], dst+fpip->w, fpip->w);
 
-	int i = kernel-1;
+	int i = kernel - 1;
 
 	for(int h=fpip->h-radius;h;--h){
-		BlurRow(row[i], dst+fpip->w*2, fpip->w);
+		BlurRow(row[i], dst+fpip->w*radius, fpip->w);
 		BlurCol(dst,tbl[i],fpip->w);
 
 		if(++i>=kernel) i = 0;
@@ -531,6 +560,5 @@ BOOL func_WndProc( HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam, void *
 
 	return FALSE;
 }
-
 
 
